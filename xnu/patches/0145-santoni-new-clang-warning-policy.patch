@@ -1,0 +1,14 @@
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -177,6 +177,11 @@
+ 
+ WARNFLAGS_STD := $(WARNFLAGS_STD) \
+ 	-Wno-error=declaration-after-statement
++
++# Newer clang (Xcode 26) enables -Wreserved-identifier by default and the
++# legacy kernel headers use reserved prefixes everywhere; without this the
++# build log grows by megabytes of warnings per compile. Warnings only.
++WARNFLAGS_STD := $(WARNFLAGS_STD) -Wno-reserved-identifier
+ 
+ # Hand-written sign conversion diagnostics are resolved, but the
+ # auto-generated ones need mig and iig to be updated to fix.  Disable the

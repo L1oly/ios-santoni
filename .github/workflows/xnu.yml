@@ -17,6 +17,9 @@ on:
       machine_config:
         description: xnu MACHINE_CONFIG
         default: SANTONI
+      runner:
+        description: "Runner label: macos-15 (Intel, Xcode 16) | macos-15-arm64 | macos-26 (Intel, Xcode 26) | macos-26-arm64"
+        default: macos-15
       keep_going:
         description: make -k (collect all compile errors in one run)
         default: "true"
@@ -28,7 +31,9 @@ on:
 
 
 concurrency:
-  group: xnu-${{ github.ref }}
+  # Keyed by runner label too, so a dispatch on another image (or a push) does
+  # not cancel a run that is already queued for a scarce macOS pool.
+  group: xnu-${{ github.ref }}-${{ inputs.runner || 'push' }}
   cancel-in-progress: true
 
 env:
@@ -53,7 +58,13 @@ jobs:
     # lacks; tools/sweet-iig-compat.py rewrites just that generated code back
     # to the old ABI. Proven on the sibling sweet tree (kernel 0177, run
     # 41322973942, booted and ran normally).
-    runs-on: macos-15
+    #
+    # macos-15 is the Intel (x86_64) image; macos-15-arm64 is Apple Silicon.
+    # Both cross-build the same arm64 kernel. GitHub allocates them from
+    # different pools, so when one pool is starved the other is worth trying.
+    # macos-26 has no Xcode 16, so it selects Xcode 26 (the adapter and patch
+    # 0145 cover its iig output and warning policy).
+    runs-on: ${{ inputs.runner || 'macos-15' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4

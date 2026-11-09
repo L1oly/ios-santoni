@@ -131,6 +131,16 @@ The artifact is `kernel.development.santoni`. Without `gh`, the artifact is at
 `https://nightly.link/YOU/ios-santoni/workflows/xnu/santoni/xnu-kernel.zip`
 once the run is green. A cold build is long (the job allows 120 minutes).
 
+If GitHub cannot allocate a runner ("The job was not acquired by Runner of type
+hosted"), that is capacity, not a build error — no step runs. Re-run it, or
+dispatch on another pool. `macos-15` is the Intel image and `macos-15-arm64` is
+Apple Silicon; `macos-26` and `macos-26-arm64` ship Xcode 26 only (the IIG
+adapter and patch 0145 handle it). All four cross-build the same arm64 kernel:
+
+```sh
+gh workflow run xnu.yml -R YOU/ios-santoni --ref santoni -f runner=macos-15-arm64
+```
+
 ### 2. Build the iOS root image
 
 Download the iPhone X (iPhone10,3) iOS 16.7.16 (20H392) IPSW from Apple. On
