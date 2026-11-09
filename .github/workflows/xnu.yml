@@ -1,5 +1,10 @@
 name: xnu
 
+# Runner note: macOS hosted runners occasionally fail to allocate
+# ("The job was not acquired by Runner of type hosted even after multiple
+# attempts"). That is GitHub-side capacity, not a build failure - no step runs.
+# Re-run the job from the Actions tab, or push again, until it is picked up.
+
 on:
   workflow_dispatch:
     inputs:
