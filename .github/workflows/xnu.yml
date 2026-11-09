@@ -42,9 +42,13 @@ env:
 
 jobs:
   build:
-    # macos-14 still ships Xcode 15.x: its iig matches the xnu-8796 IORPC ABI
-    # (Xcode 16's iig emits IORPC.kernelContent, which this xnu lacks)
-    runs-on: macos-14
+    # macos-14 shipped Xcode 15.x, whose iig matches the xnu-8796 IORPC ABI,
+    # but those images were retired on 2026-11-02. macos-15's oldest Xcode
+    # (16.0, picked in Deps below) emits IORPC.kernelContent, which this xnu
+    # lacks; tools/sweet-iig-compat.py rewrites just that generated code back
+    # to the old ABI. Proven on the sibling sweet tree (kernel 0177, run
+    # 41322973942, booted and ran normally).
+    runs-on: macos-15
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +59,10 @@ jobs:
           # 0143/0144) plus the three phase 4 host tests: SDHCI mock, hardened
           # GPT with the SYSTEM log fence, and the console log ring.
           bash tests/run_tests.sh
+          # Xcode 16+ iig emits IORPC.kernelContent; the adapter must map every
+          # known generated form back to the xnu-8796 ABI and fail closed on
+          # anything new.
+          python3 tools/check-sweet-iig-compat.py
 
       - name: Fetch build script
         run: |
@@ -87,6 +95,11 @@ jobs:
           sudo xcode-select -s "$XC"
           xcodebuild -version
           xcrun --find iig
+          # xnu's makedefs take IIG from the environment when set
+          # (makedefs/MakeInc.cmd: ifeq ($(origin IIG),undefined)). Point it at
+          # the ABI adapter so the generated .iig.cpp keeps the 8796 layout.
+          echo "SWEET_REAL_IIG=$(xcrun --find iig)" >> "$GITHUB_ENV"
+          echo "IIG=$GITHUB_WORKSPACE/tools/sweet-iig-compat.py" >> "$GITHUB_ENV"
           mkdir -p "$CCACHE_WRAP"
           for t in clang clang++; do
             printf '#!/bin/sh\nexec ccache %s "$@"\n' "$(xcrun -find $t)" > "$CCACHE_WRAP/$t"
@@ -127,6 +140,24 @@ jobs:
             exit 1
           fi
           echo "no Santoni storage patch skipped"
+
+      - name: Verify the IIG ABI adapter ran
+        if: always()
+        run: |
+          # The adapter rewrites generated .iig.cpp in place. If Xcode's iig
+          # still left kernelContent in the generated code, the build only
+          # "succeeded" by accident (or -k hid the error); fail loudly.
+          hits=$(grep -rIl "kernelContent" dxb/build --include='*.iig.cpp' 2>/dev/null || true)
+          if [ -n "$hits" ]; then
+            echo "$hits"
+            echo "::error::generated iig code still uses IORPC.kernelContent"
+            exit 1
+          fi
+          if [ -f build.log ] && grep -q "SWEET IIG: normalized" build.log; then
+            echo "adapter rewrote generated IORPC access for xnu-8796"
+          else
+            echo "adapter reported no kernelContent use (iig output already 8796-compatible)"
+          fi
 
       - name: Package build tree for local compiles
         if: always()
