@@ -4,6 +4,10 @@ name: xnu
 # ("The job was not acquired by Runner of type hosted even after multiple
 # attempts"). That is GitHub-side capacity, not a build failure - no step runs.
 # Re-run the job from the Actions tab, or push again, until it is picked up.
+# If nothing acquires the job for ~15 minutes GitHub cancels it: the run shows
+# `conclusion: cancelled`, `runner_name: ""` and an empty `steps` list, and no
+# artifacts are produced (seen on 42856492264). A push is the only retry that
+# works without admin rights.
 
 on:
   workflow_dispatch:
