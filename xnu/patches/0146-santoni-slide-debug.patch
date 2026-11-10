@@ -1,0 +1,73 @@
+diff --git a/osfmk/vm/vm_shared_region.c b/osfmk/vm/vm_shared_region.c
+--- a/osfmk/vm/vm_shared_region.c
++++ b/osfmk/vm/vm_shared_region.c
+@@ -2631,6 +2631,16 @@
+ 	si->si_start = start;
+ 	si->si_end = si->si_start + size;
+ 	si->si_slide = slide;
++#if defined(ARM64_BOARD_CONFIG_SANTONI)
++	/* TEMPORARY santoni slide diagnostic (patch 0146): what dyld handed us. */
++	printf("SLIDEMAP start=0x%llx size=0x%llx slid=0x%llx slide=0x%x "
++	    "v=%u ps=0x%x psc=%u sisz=0x%llx\n",
++	    (uint64_t)start, (uint64_t)size, (uint64_t)slid_mapping, slide,
++	    si->si_slide_info_entry->v2.version,
++	    si->si_slide_info_entry->v2.page_size,
++	    si->si_slide_info_entry->v2.page_starts_count,
++	    (uint64_t)slide_info_size);
++#endif
+ #if __has_feature(ptrauth_calls)
+ 	/*
+ 	 * If there is authenticated pointer data in this slid mapping,
+diff --git a/osfmk/vm/vm_shared_region_pager.c b/osfmk/vm/vm_shared_region_pager.c
+--- a/osfmk/vm/vm_shared_region_pager.c
++++ b/osfmk/vm/vm_shared_region_pager.c
+@@ -749,6 +749,49 @@
+ 				    src_page->vmp_cs_nx,
+ 				    kr);
+ 			}
++#if defined(ARM64_BOARD_CONFIG_SANTONI)
++			/*
++			 * TEMPORARY santoni slide diagnostic (patch 0146): report the
++			 * exact page index, the slide-info entry for it, and the first
++			 * and last 8 bytes of the page that is about to be rebased.
++			 * Capped so the boot log ring stays readable.
++			 */
++			{
++				static int srdbg;
++
++				if (srdbg < 24) {
++					vm_shared_region_slide_info_entry_v2_t ds =
++					    &pager->srp_slide_info->si_slide_info_entry->v2;
++					uint32_t dp = (uint32_t)(offset_in_sliding_range /
++					    PAGE_SIZE_FOR_SR_SLIDE);
++					uint16_t dpe = 0;
++
++					if (dp < ds->page_starts_count) {
++						dpe = ((uint16_t *)((uintptr_t)ds +
++						    ds->page_starts_offset))[dp];
++					}
++					srdbg++;
++					printf("SLIDEDBG off=0x%llx back=0x%llx sis=0x%llx "
++					    "sie=0x%llx len=0x%llx pidx=%u psc=%u pe=0x%x "
++					    "dm=0x%llx kr=0x%x src0=0x%llx dst0=0x%llx "
++					    "dstlast=0x%llx\n",
++					    (uint64_t)offset,
++					    (uint64_t)pager->srp_backing_offset,
++					    (uint64_t)pager->srp_slide_info->si_start,
++					    (uint64_t)pager->srp_slide_info->si_end,
++					    (uint64_t)length,
++					    dp,
++					    ds->page_starts_count,
++					    dpe,
++					    ds->delta_mask,
++					    kr,
++					    *(uint64_t *)(uintptr_t)src_vaddr,
++					    *(uint64_t *)(uintptr_t)(dst_vaddr + offset_in_page),
++					    *(uint64_t *)(uintptr_t)(dst_vaddr + offset_in_page +
++					    PAGE_SIZE_FOR_SR_SLIDE - sizeof(uint64_t)));
++				}
++			}
++#endif /* ARM64_BOARD_CONFIG_SANTONI */
+ 			if (kr != KERN_SUCCESS) {
+ 				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_SHARED_REGION, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_SHARED_REGION_SLIDE_ERROR), 0 /* arg */);
+ 				shared_region_pager_slid_error++;
