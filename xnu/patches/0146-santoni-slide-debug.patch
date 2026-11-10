@@ -1,7 +1,8 @@
 diff --git a/osfmk/vm/vm_shared_region.c b/osfmk/vm/vm_shared_region.c
+index db1d613..2c62d8d 100644
 --- a/osfmk/vm/vm_shared_region.c
 +++ b/osfmk/vm/vm_shared_region.c
-@@ -2631,6 +2631,16 @@
+@@ -2631,6 +2631,16 @@ vm_shared_region_slide_mapping(
  	si->si_start = start;
  	si->si_end = si->si_start + size;
  	si->si_slide = slide;
@@ -19,52 +20,114 @@ diff --git a/osfmk/vm/vm_shared_region.c b/osfmk/vm/vm_shared_region.c
  	/*
  	 * If there is authenticated pointer data in this slid mapping,
 diff --git a/osfmk/vm/vm_shared_region_pager.c b/osfmk/vm/vm_shared_region_pager.c
+index 43d7d09..b579322 100644
 --- a/osfmk/vm/vm_shared_region_pager.c
 +++ b/osfmk/vm/vm_shared_region_pager.c
-@@ -749,6 +749,49 @@
+@@ -686,6 +686,11 @@ retry_src_fault:
+ 			vm_object_offset_t chunk_offset;
+ 			vm_object_offset_t offset_in_backing_object;
+ 			vm_object_offset_t offset_in_sliding_range;
++#if defined(ARM64_BOARD_CONFIG_SANTONI)
++			/* TEMPORARY santoni slide diagnostic (patch 0146): what the
++			 * destination held right after the copy, before rebasing. */
++			uint64_t srdbg_pre0 = 0;
++#endif
+ 
+ 			chunk_offset = offset + cur_offset + offset_in_page;
+ 
+@@ -693,6 +698,10 @@ retry_src_fault:
+ 			    offset_in_page),
+ 			    (char *)(dst_vaddr + offset_in_page),
+ 			    PAGE_SIZE_FOR_SR_SLIDE);
++#if defined(ARM64_BOARD_CONFIG_SANTONI)
++			srdbg_pre0 = *(uint64_t *)(uintptr_t)(dst_vaddr +
++			    offset_in_page);
++#endif
+ 
+ 			offset_in_backing_object = (chunk_offset +
+ 			    pager->srp_backing_offset);
+@@ -749,6 +758,87 @@ retry_src_fault:
  				    src_page->vmp_cs_nx,
  				    kr);
  			}
 +#if defined(ARM64_BOARD_CONFIG_SANTONI)
 +			/*
-+			 * TEMPORARY santoni slide diagnostic (patch 0146): report the
-+			 * exact page index, the slide-info entry for it, and the first
-+			 * and last 8 bytes of the page that is about to be rebased.
-+			 * Capped so the boot log ring stays readable.
++			 * TEMPORARY santoni slide diagnostic (patch 0146).
++			 *
++			 * Only failures are reported.  The point is to tell apart the two
++			 * candidate causes of an overflow:
++			 *
++			 *   (a) the source page handed to the slider is not the cache
++			 *       file's page at this index (wrong read, or wrong object
++			 *       offset), or
++			 *   (b) the source page is right but the destination holds
++			 *       something else by the time it is slid (aliased or reused
++			 *       physical page).
++			 *
++			 * sh/dh are FNV-1a 64 over the 4096-byte source page and the
++			 * 4096-byte destination page after rebasing, so both can be
++			 * compared against the image offline.  sp/dp are physical page
++			 * numbers, so sp == dp exposes a source/destination alias
++			 * immediately.  so is the source page's offset inside its
++			 * backing object and want is si_start + pidx * 4096, the offset
++			 * a correct read must produce.
 +			 */
-+			{
-+				static int srdbg;
++			if (kr != KERN_SUCCESS) {
++				static int srdbg_fail;
 +
-+				if (srdbg < 24) {
++				if (srdbg_fail < 12) {
 +					vm_shared_region_slide_info_entry_v2_t ds =
 +					    &pager->srp_slide_info->si_slide_info_entry->v2;
 +					uint32_t dp = (uint32_t)(offset_in_sliding_range /
 +					    PAGE_SIZE_FOR_SR_SLIDE);
 +					uint16_t dpe = 0;
++					uint64_t sh = 0xcbf29ce484222325ULL;
++					uint64_t dh = 0xcbf29ce484222325ULL;
++					const uint8_t *sp8 =
++					    (const uint8_t *)(uintptr_t)src_vaddr;
++					const uint8_t *dp8 =
++					    (const uint8_t *)(uintptr_t)dst_vaddr;
 +
 +					if (dp < ds->page_starts_count) {
 +						dpe = ((uint16_t *)((uintptr_t)ds +
 +						    ds->page_starts_offset))[dp];
 +					}
-+					srdbg++;
-+					printf("SLIDEDBG off=0x%llx back=0x%llx sis=0x%llx "
-+					    "sie=0x%llx len=0x%llx pidx=%u psc=%u pe=0x%x "
-+					    "dm=0x%llx kr=0x%x src0=0x%llx dst0=0x%llx "
-+					    "dstlast=0x%llx\n",
++					for (uint32_t i = 0; i < PAGE_SIZE; i++) {
++						sh ^= sp8[i];
++						sh *= 0x100000001b3ULL;
++						dh ^= dp8[i];
++						dh *= 0x100000001b3ULL;
++					}
++					srdbg_fail++;
++					printf("SLIDEFAIL off=0x%llx back=0x%llx pidx=%u "
++					    "pe=0x%x dm=0x%llx sp=0x%x dp=0x%x "
++					    "so=0x%llx want=0x%llx q=%u cs=%d "
++					    "sh=0x%llx dh=0x%llx pre=0x%llx "
++					    "src0=0x%llx srcl=0x%llx "
++					    "dst0=0x%llx dstl=0x%llx\n",
 +					    (uint64_t)offset,
 +					    (uint64_t)pager->srp_backing_offset,
-+					    (uint64_t)pager->srp_slide_info->si_start,
-+					    (uint64_t)pager->srp_slide_info->si_end,
-+					    (uint64_t)length,
 +					    dp,
-+					    ds->page_starts_count,
 +					    dpe,
 +					    ds->delta_mask,
-+					    kr,
++					    (unsigned)VM_PAGE_GET_PHYS_PAGE(src_page),
++					    (unsigned)dst_pnum,
++					    (uint64_t)src_page->vmp_offset,
++					    (uint64_t)pager->srp_slide_info->si_start +
++					    (uint64_t)dp * PAGE_SIZE_FOR_SR_SLIDE,
++					    (unsigned)src_page->vmp_q_state,
++					    (int)src_page_object->code_signed,
++					    sh,
++					    dh,
++					    srdbg_pre0,
 +					    *(uint64_t *)(uintptr_t)src_vaddr,
-+					    *(uint64_t *)(uintptr_t)(dst_vaddr + offset_in_page),
-+					    *(uint64_t *)(uintptr_t)(dst_vaddr + offset_in_page +
-+					    PAGE_SIZE_FOR_SR_SLIDE - sizeof(uint64_t)));
++					    *(uint64_t *)(uintptr_t)(src_vaddr +
++					    PAGE_SIZE - sizeof(uint64_t)),
++					    *(uint64_t *)(uintptr_t)(dst_vaddr +
++					    offset_in_page),
++					    *(uint64_t *)(uintptr_t)(dst_vaddr +
++					    offset_in_page + PAGE_SIZE_FOR_SR_SLIDE -
++					    sizeof(uint64_t)));
 +				}
 +			}
 +#endif /* ARM64_BOARD_CONFIG_SANTONI */
