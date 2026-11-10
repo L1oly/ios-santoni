@@ -1,0 +1,131 @@
+diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
+index b7e02be..6cd8a1d 100644
+--- a/bsd/dev/santoni_sdhci.c
++++ b/bsd/dev/santoni_sdhci.c
+@@ -2349,6 +2349,9 @@ santoni_sdhci_strategy(buf_t bp)
+ 	uint64_t part_bytes = se.nblocks * SDHCI_BLOCK;
+ 	bool rd = (buf_flags(bp) & B_READ) != 0;
+ 	bool user;
++	char *bounce;
++	void *staging = NULL;
++	vm_size_t staging_size = 0;
+ 
+ 	buf_setresid(bp, count);
+ 	if (!rd && !se.writable) {
+@@ -2380,56 +2383,95 @@ santoni_sdhci_strategy(buf_t bp)
+ 	user = (buf_flags(bp) & B_PHYS) != 0 &&
+ 	    !santoni_kernel_address(vaddr);
+ 
++	/*
++	 * Kernel/VFS I/O stages through the shared bounce buffer, and the
++	 * whole request - the polled PIO *and* the copy between the bounce
++	 * buffer and the caller's pages - runs under santoni_sdhci_lock.
++	 *
++	 * Keeping the lock only around the PIO (as this driver used to) lets a
++	 * second request refill the shared bounce buffer between the unlock
++	 * and the copy, so the copy moves the *other* request's data into this
++	 * request's pages. That is how dyld shared-cache pages ended up holding
++	 * another file's contents and how an HFS+ catalog node ended up holding
++	 * dyld cache text (SLIDEFAIL sh != image hash, so == want). sweet's UFS
++	 * driver holds its lock over the copy for the same reason.
++	 *
++	 * A B_PHYS user buffer cannot be touched from EL1 and copyin()/copyout()
++	 * may block, so it gets a private staging buffer instead of the shared
++	 * one; the lock then only has to cover the PIO.
++	 */
++	if (user) {
++		staging_size = roundup(MIN(count, (uint32_t)BOUNCE_SIZE),
++		    SDHCI_BLOCK);
++		if (kmem_alloc(kernel_map, (vm_offset_t *)&staging,
++		    staging_size) != KERN_SUCCESS) {
++			error = ENOMEM;
++			goto unmap;
++		}
++		bounce = (char *)staging;
++	} else {
++		bounce = (char *)(se.dma + DMA_BOUNCE);
++	}
++
++	lck_mtx_lock(&santoni_sdhci_lock);
+ 	for (uint32_t done = 0; done < count;) {
+ 		uint64_t pos = off + done;
+ 		uint64_t lba = pos / SDHCI_BLOCK;
+ 		uint32_t skip = (uint32_t)(pos % SDHCI_BLOCK);
+ 		uint32_t want = MIN(count - done, (uint32_t)BOUNCE_SIZE - skip);
+ 		uint32_t blocks = (skip + want + SDHCI_BLOCK - 1) / SDHCI_BLOCK;
+-		char *bounce = (char *)(se.dma + DMA_BOUNCE);
+ 
+ 		if (rd) {
+-			lck_mtx_lock(&santoni_sdhci_lock);
+ 			error = santoni_sdhci_read_blocks(se.first_block + lba,
+ 			    blocks, bounce);
+-			lck_mtx_unlock(&santoni_sdhci_lock);
+-			if (!error) {
+-				if (user) {
+-					error = copyout(bounce + skip,
+-					    (user_addr_t)(vaddr + done), want);
+-				} else {
+-					memcpy(vaddr + done, bounce + skip, want);
++			if (error) {
++				break;
++			}
++			if (user) {
++				lck_mtx_unlock(&santoni_sdhci_lock);
++				error = copyout(bounce + skip,
++				    (user_addr_t)(vaddr + done), want);
++				lck_mtx_lock(&santoni_sdhci_lock);
++				if (error) {
++					break;
+ 				}
++			} else {
++				memcpy(vaddr + done, bounce + skip, want);
+ 			}
+ 		} else {
+ 			if (skip || (want % SDHCI_BLOCK)) {
+-				lck_mtx_lock(&santoni_sdhci_lock);
+-				error = santoni_sdhci_read_blocks(se.first_block + lba,
+-				    blocks, bounce);
+-				lck_mtx_unlock(&santoni_sdhci_lock);
++				error = santoni_sdhci_read_blocks(
++				    se.first_block + lba, blocks, bounce);
+ 				if (error) {
+ 					break;
+ 				}
+ 			}
+ 			if (user) {
++				lck_mtx_unlock(&santoni_sdhci_lock);
+ 				error = copyin((user_addr_t)(vaddr + done),
+ 				    bounce + skip, want);
++				lck_mtx_lock(&santoni_sdhci_lock);
++				if (error) {
++					break;
++				}
+ 			} else {
+ 				memcpy(bounce + skip, vaddr + done, want);
+ 			}
+-			if (!error) {
+-				lck_mtx_lock(&santoni_sdhci_lock);
+-				error = santoni_sdhci_write_blocks(
+-				    se.first_block + lba, blocks, bounce);
+-				lck_mtx_unlock(&santoni_sdhci_lock);
++			error = santoni_sdhci_write_blocks(se.first_block + lba,
++			    blocks, bounce);
++			if (error) {
++				break;
+ 			}
+ 		}
+-		if (error) {
+-			break;
+-		}
+ 		done += want;
+ 		buf_setresid(bp, count - done);
+ 	}
++	lck_mtx_unlock(&santoni_sdhci_lock);
++
++	if (staging != NULL) {
++		kmem_free(kernel_map, (vm_offset_t)staging, staging_size);
++	}
++unmap:
+ 	buf_unmap(bp);
+ 
+ done:
