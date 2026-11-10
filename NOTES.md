@@ -1,5 +1,72 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## eeb7ddc (2026-11-10): dyld-cache slide wall was a bounce-buffer race
+
+- **Symptom:** every process dies on the shared-cache slide wall,
+  `vm_shared_region_slide_page() offset overflow: pageIndex=<n>, start_offset=<o>`
+  followed by `CRASH <proc> sig 10 code 0x10000000a`, plus
+  `hfs_swap_BTNode: invalid forward link (0x70746963 >= 0x00005000)` /
+  `hfs_mark_inconsistent: Runtime corruption detected on iOSRoot`. The failing
+  `pageIndex` changes every boot (2116/2112 at slide `0x3184000`; 22160/3134 at
+  `0x54998000`; 11763 at `0x3625c000`).
+- **Offline work that ruled things out:** a faithful reimplementation of
+  `rebase_chain_64` (`delta_mask` is `0x00ffff0000000000`, `delta_shift` = 38,
+  `value_add` 0 - the 14-hex-digit print hides the top byte) reproduces all 24
+  `SLIDEDBG` successes byte-for-byte, and with it all six slid mappings have
+  **zero** overflowing pages. The on-disk bytes at every tested failing page
+  match `work/ios16-root.img`, so the image and the slide info are consistent.
+- **Decisive diagnostic (patch 0146, gated on failure):** for the failing page
+  the kernel reports `so == want` (right backing-object offset, i.e. the right
+  file page) but `sh` (FNV-1a over the 4096 source bytes) does not match the
+  image. The 4096 bytes the slider received are byte-identical to an unrelated
+  page at image offset `0x244756000` - the page held **another file's**
+  content. `sp != dp`, so it is not a source/destination alias.
+- **Root cause:** `santoni_sdhci_strategy()` took `santoni_sdhci_lock` only
+  around the polled PIO and released it *before* `memcpy()`/`copyout()` moved
+  data between the single shared bounce buffer (`se.dma + DMA_BOUNCE`) and the
+  caller's pages. A second request in that window refilled the bounce buffer,
+  so the first request copied the other request's data into its own pages.
+  This corrupts whatever the buffer cache happens to be paging in (dyld cache
+  page -> stale page from another file; HFS+ catalog node -> dyld cache text),
+  and is timing dependent, which is why the failing index moves per boot.
+  sweet's `sweet_ufs_strategy()` holds `sweet_ufs_lock` over its copy.
+- **Fix (patch 0147):** hold the lock over the whole request (PIO + copy), as
+  sweet does. A `B_PHYS` user buffer cannot be touched from EL1 and
+  `copyin()`/`copyout()` may block, so it stages through a private
+  `kmem_alloc()` buffer (the same pattern as the `/dev/remmcroot0` cdev path
+  above) and the lock is dropped only around those copies.
+- **Boot 2026-11-10 (kernel `73f84ce`, boot image
+  `shim/out/shim-boot-emmc-rw.img` SHA256 `b2b7879d...71a4`):** log ring pulled
+  from SYSTEM (`dd bs=512 count=8193`, `tools/sweet-log.py`, 9246 lines). 12
+  `SLIDEFAIL` lines, all the same page, all with the same `sh`; 13
+  `offset overflow` lines. `SLIDEMAP` shows the four slid mappings at slide
+  `0x3625c000` with `psc` 21424/24048/10644/14232, matching the image header.
+- **CI:** run `42852193407` (commit `eeb7ddc`) **failed** in `Build` after
+  6 min. Steps 1–6 and 8–14 passed, so the patches applied and the IIG adapter
+  ran; the `xnu-kernel` artifact had no kernel. Build logs need admin rights,
+  so the cause had to be recovered from the artifacts: the failed run's
+  `xnu-buildtree` has every component `*.filelist` **except**
+  `bsd/DEVELOPMENT/bsd.filelist`, and `bsd/dev/santoni_sdhci.c` is the only
+  source that differs from the previous green run — i.e. that file did not
+  compile.
+- **Compile error:** `bsd/dev/santoni_sdhci.c:2410: error: too few arguments to
+  function call, expected 5, have 3`. In this xnu, `osfmk/vm/vm_kern.h` exposes
+  the `XNU_KERNEL_PRIVATE` form
+  `kmem_alloc(map, addrp, size, kma_flags_t, vm_tag_t)`, not the 3-argument
+  `KERNEL_PRIVATE` one. Reproduced locally with the real CI flags
+  (`build/xnu.obj/DEVELOPMENT_ARM64_SANTONI/.CFLAGS` from the green run plus
+  the component `Makefile`): the flag file carries
+  `-DXNU_KERNEL_PRIVATE`, so the 5-argument inline is the one in scope. Fixed
+  by matching `santoni_sdhci_uio()` in the same file:
+  `kmem_alloc(kernel_map, &staging, staging_size, KMA_DATA, VM_KERN_MEMORY_BSD)`
+  with `vm_offset_t staging = 0` (was `void *staging`).
+- **CI hardening:** `build.log` is now uploaded as the `build-log` artifact and
+  a failing `Build` prints its `error:` lines, because a failed build otherwise
+  ships nothing diagnosable.
+- **Next concrete action:** boot the 0147 kernel with 0146 still enabled and
+  confirm the log has **no** `SLIDEFAIL` / `offset overflow` / `hfs_mark_inconsistent`
+  lines and that boot gets past `exec SpringBoard`; then remove 0146.
+
 ## dff9f18 (2026-10-22): fix EL1 permission fault on `/dev/remmcroot0` reads
 
 - **Symptom:** PID 1 read of `/dev/remmcroot0` panicked in `_memmove` at

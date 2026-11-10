@@ -1,18 +1,18 @@
 diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
-index b7e02be..6cd8a1d 100644
+index 704b37d..22e5ccd 100644
 --- a/bsd/dev/santoni_sdhci.c
 +++ b/bsd/dev/santoni_sdhci.c
-@@ -2349,6 +2349,9 @@ santoni_sdhci_strategy(buf_t bp)
+@@ -2353,6 +2353,9 @@ santoni_sdhci_strategy(buf_t bp)
  	uint64_t part_bytes = se.nblocks * SDHCI_BLOCK;
  	bool rd = (buf_flags(bp) & B_READ) != 0;
  	bool user;
 +	char *bounce;
-+	void *staging = NULL;
++	vm_offset_t staging = 0;
 +	vm_size_t staging_size = 0;
  
  	buf_setresid(bp, count);
  	if (!rd && !se.writable) {
-@@ -2380,56 +2383,95 @@ santoni_sdhci_strategy(buf_t bp)
+@@ -2384,56 +2387,95 @@ santoni_sdhci_strategy(buf_t bp)
  	user = (buf_flags(bp) & B_PHYS) != 0 &&
  	    !santoni_kernel_address(vaddr);
  
@@ -36,8 +36,8 @@ index b7e02be..6cd8a1d 100644
 +	if (user) {
 +		staging_size = roundup(MIN(count, (uint32_t)BOUNCE_SIZE),
 +		    SDHCI_BLOCK);
-+		if (kmem_alloc(kernel_map, (vm_offset_t *)&staging,
-+		    staging_size) != KERN_SUCCESS) {
++		if (kmem_alloc(kernel_map, &staging, staging_size,
++		    KMA_DATA, VM_KERN_MEMORY_BSD) != KERN_SUCCESS) {
 +			error = ENOMEM;
 +			goto unmap;
 +		}
@@ -122,8 +122,8 @@ index b7e02be..6cd8a1d 100644
  	}
 +	lck_mtx_unlock(&santoni_sdhci_lock);
 +
-+	if (staging != NULL) {
-+		kmem_free(kernel_map, (vm_offset_t)staging, staging_size);
++	if (staging != 0) {
++		kmem_free(kernel_map, staging, staging_size);
 +	}
 +unmap:
  	buf_unmap(bp);

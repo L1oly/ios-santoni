@@ -140,7 +140,18 @@ jobs:
           set -o pipefail
           ccache -z
           bash build.sh 2>&1 | tee ../build.log
+          rc=$?
           ccache -s
+          exit $rc
+
+      - name: Build errors
+        # The full log is not downloadable without admin rights, and a failed
+        # build ships no kernel, so surface the diagnostics in the job itself
+        # and keep build.log as an artifact (below).
+        if: failure()
+        run: |
+          test -f build.log || { echo "no build.log"; exit 0; }
+          grep -nE "error:|fatal error:|undefined symbol|multiple definition|\*\*\* \[" build.log | head -80 || true
 
       - name: Fail if a Santoni storage patch was skipped
         if: always()
@@ -196,6 +207,17 @@ jobs:
           name: xnu-buildtree
           path: buildtree.tgz
           retention-days: 7
+
+      - name: Upload build log
+        # Build logs need admin rights to download, so keep the one file that
+        # explains a failed build.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Inspect closed KDK support libs
         if: always()
